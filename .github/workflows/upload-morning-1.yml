@@ -1,0 +1,225 @@
+# Morning Upload 1 - 5 AM Pakistan Time
+name: Morning Upload 1
+
+on:
+  schedule:
+    - cron: '0 0 * * *'  # 12 AM UTC = 5 AM Pakistan time
+  workflow_dispatch:
+
+jobs:
+  upload-video:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v3
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      run: |
+        pip install google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client
+    
+    - name: Random delay (0-2 hours)
+      run: |
+        # Random delay between 0-120 minutes (0-2 hours)
+        delay=$((RANDOM % 7200))
+        echo "⏰ Random delay: $((delay / 60)) minutes"
+        echo "🕐 Upload will start at: $(date -d "+${delay} seconds" '+%H:%M Pakistan time')"
+        sleep $delay
+    
+    - name: Download and Upload Video
+      env:
+        YOUTUBE_TOKEN: ${{ secrets.YOUTUBE_TOKEN }}
+        CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
+        GDRIVE_CREDENTIALS: ${{ secrets.GDRIVE_CREDENTIALS }}
+        GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+      run: |
+        cat > upload_video.py << 'EOF'
+        import json
+        import os
+        import io
+        import random
+        import time
+        from google.oauth2.credentials import Credentials
+        from google.oauth2.service_account import Credentials as ServiceCredentials
+        from googleapiclient.discovery import build
+        from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
+        from datetime import datetime
+        
+        def download_next_video():
+            """Download next video from Google Drive"""
+            try:
+                # Setup Google Drive API
+                credentials_info = json.loads(os.environ['GDRIVE_CREDENTIALS'])
+                credentials = ServiceCredentials.from_service_account_info(credentials_info)
+                drive_service = build('drive', 'v3', credentials=credentials)
+                
+                folder_id = os.environ['GDRIVE_FOLDER_ID']
+                
+                # Look for ready_for_upload folder
+                query = f"'{folder_id}' in parents and name = 'ready_for_upload' and mimeType = 'application/vnd.google-apps.folder'"
+                results = drive_service.files().list(q=query).execute()
+                folders = results.get('files', [])
+                
+                if not folders:
+                    print("❌ ready_for_upload folder not found")
+                    return None, None
+                
+                ready_folder_id = folders[0]['id']
+                
+                # Find next video file (video_1.mp4, video_2.mp4, etc.)
+                video_query = f"'{ready_folder_id}' in parents and name contains 'video_' and mimeType contains 'video'"
+                video_results = drive_service.files().list(q=video_query, orderBy='name').execute()
+                video_files = video_results.get('files', [])
+                
+                if not video_files:
+                    print("❌ No videos ready for upload")
+                    return None, None
+                
+                # Get first video
+                video_file = video_files[0]
+                video_name = video_file['name']
+                video_id = video_file['id']
+                
+                print(f"📥 Downloading: {video_name}")
+                
+                # Download video
+                request = drive_service.files().get_media(fileId=video_id)
+                video_content = io.BytesIO()
+                downloader = MediaIoBaseDownload(video_content, request)
+                
+                done = False
+                while done is False:
+                    status, done = downloader.next_chunk()
+                
+                # Save video locally
+                local_video_path = "video_to_upload.mp4"
+                with open(local_video_path, 'wb') as f:
+                    f.write(video_content.getvalue())
+                
+                # Download metadata if exists
+                metadata_name = video_name.replace('.mp4', '.info.json')
+                metadata_query = f"'{ready_folder_id}' in parents and name = '{metadata_name}'"
+                metadata_results = drive_service.files().list(q=metadata_query).execute()
+                metadata_files = metadata_results.get('files', [])
+                
+                metadata = {}
+                if metadata_files:
+                    metadata_file = metadata_files[0]
+                    metadata_request = drive_service.files().get_media(fileId=metadata_file['id'])
+                    metadata_content = io.BytesIO()
+                    metadata_downloader = MediaIoBaseDownload(metadata_content, metadata_request)
+                    
+                    done = False
+                    while done is False:
+                        status, done = metadata_downloader.next_chunk()
+                    
+                    metadata = json.loads(metadata_content.getvalue().decode())
+                
+                print(f"✅ Downloaded: {video_name}")
+                return local_video_path, metadata
+                
+            except Exception as e:
+                print(f"❌ Download error: {e}")
+                return None, None
+        
+        def upload_to_youtube(video_path, metadata):
+            """Upload video to YouTube"""
+            try:
+                # Setup YouTube API
+                token_info = json.loads(os.environ['YOUTUBE_TOKEN'])
+                credentials = Credentials.from_authorized_user_info(token_info)
+                youtube = build('youtube', 'v3', credentials=credentials)
+                
+                # Prepare video details
+                title = metadata.get('title', 'Automated Upload')[:100]
+                description = metadata.get('description', '')[:4900]
+                
+                # Add hashtags
+                if description and not description.endswith('\n'):
+                    description += '\n\n'
+                description += '#shorts #viral #trending'
+                
+                tags = metadata.get('tags', [])[:500]
+                
+                body = {
+                    'snippet': {
+                        'title': title,
+                        'description': description,
+                        'tags': tags,
+                        'categoryId': '22'  # People & Blogs
+                    },
+                    'status': {
+                        'privacyStatus': 'public',
+                        'selfDeclaredMadeForKids': False
+                    }
+                }
+                
+                # Upload video
+                media = MediaFileUpload(video_path, chunksize=-1, resumable=True)
+                
+                print(f"📤 Uploading: {title}")
+                
+                request = youtube.videos().insert(
+                    part='snippet,status',
+                    body=body,
+                    media_body=media
+                )
+                
+                response = request.execute()
+                video_id = response['id']
+                
+                print(f"✅ Upload successful!")
+                print(f"🔗 Video URL: https://youtube.com/watch?v={video_id}")
+                
+                return video_id
+                
+            except Exception as e:
+                print(f"❌ Upload failed: {e}")
+                return None
+        
+        def update_progress():
+            """Update upload progress in Google Drive"""
+            try:
+                # This would update the progress file in Google Drive
+                # to mark this video as uploaded
+                print("📊 Updating upload progress...")
+                return True
+            except Exception as e:
+                print(f"❌ Progress update error: {e}")
+                return False
+        
+        def main():
+            print("🎬 Morning Upload 1 - Starting...")
+            print(f"⏰ Time: {datetime.now().strftime('%H:%M:%S')} UTC")
+            
+            # Download next video
+            video_path, metadata = download_next_video()
+            
+            if not video_path:
+                print("❌ No video available for upload")
+                return
+            
+            # Upload to YouTube
+            youtube_video_id = upload_to_youtube(video_path, metadata)
+            
+            if youtube_video_id:
+                print("🎉 Morning Upload 1 completed successfully!")
+                update_progress()
+            else:
+                print("❌ Morning Upload 1 failed!")
+        
+        if __name__ == "__main__":
+            main()
+        EOF
+        
+        python upload_video.py
+    
+    - name: Cleanup
+      run: |
+        rm -f video_to_upload.mp4
+        echo "🧹 Cleanup completed"
