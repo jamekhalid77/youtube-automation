@@ -1,0 +1,40 @@
+# Morning 5 AM Upload
+name: Morning Upload 1
+
+on:
+  schedule:
+    - cron: '0 5 * * *'  # 5 AM UTC (10 AM Pakistan)
+  workflow_dispatch:
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v3
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      run: |
+        pip install google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client
+    
+    - name: Random delay (0-2 hours)
+      run: |
+        delay=$((RANDOM % 7200))
+        echo "Waiting $delay seconds..."
+        sleep $delay
+    
+    - name: Download video from Google Drive
+      env:
+        GDRIVE_CREDENTIALS: ${{ secrets.GDRIVE_CREDENTIALS }}
+        GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+      run: python scripts/download_from_drive.py
+    
+    - name: Upload to YouTube
+      env:
+        YOUTUBE_TOKEN: ${{ secrets.YOUTUBE_TOKEN }}
+        CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
+      run: python scripts/upload_youtube.py
