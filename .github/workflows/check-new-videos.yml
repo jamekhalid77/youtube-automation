@@ -1,0 +1,128 @@
+# Daily check for new videos and download via Colab
+name: Daily Video Check & Download
+
+on:
+  schedule:
+    - cron: '0 2 * * *'  # 2 AM UTC = 7 AM Pakistan time
+  workflow_dispatch:    # Manual trigger
+
+jobs:
+  check-and-download:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v3
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      run: |
+        pip install requests google-api-python-client google-auth google-auth-oauthlib
+    
+    - name: Create trigger file for Colab
+      env:
+        GDRIVE_CREDENTIALS: ${{ secrets.GDRIVE_CREDENTIALS }}
+        GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+        CHANNEL_URL: ${{ secrets.CHANNEL_URL }}
+      run: |
+        cat > trigger_download.py << 'EOF'
+        import json
+        import os
+        from google.oauth2.service_account import Credentials
+        from googleapiclient.discovery import build
+        from googleapiclient.http import MediaFileUpload
+        import io
+        import time
+        
+        def create_trigger_file():
+            try:
+                # Setup Google Drive API
+                credentials_info = json.loads(os.environ['GDRIVE_CREDENTIALS'])
+                credentials = Credentials.from_service_account_info(credentials_info)
+                service = build('drive', 'v3', credentials=credentials)
+                
+                folder_id = os.environ['GDRIVE_FOLDER_ID']
+                
+                # Create trigger data
+                trigger_data = {
+                    "action": "download_new_videos",
+                    "timestamp": time.time(),
+                    "source": "github_actions",
+                    "channel_url": os.environ['CHANNEL_URL'],
+                    "scheduled_time": "daily_7am_pakistan"
+                }
+                
+                # Create trigger file content
+                trigger_content = json.dumps(trigger_data, indent=2)
+                
+                # Create file in Drive triggers folder
+                file_metadata = {
+                    'name': 'download_trigger.json',
+                    'parents': [folder_id]
+                }
+                
+                # Check if triggers folder exists, if not create it
+                query = f"'{folder_id}' in parents and name = 'triggers' and mimeType = 'application/vnd.google-apps.folder'"
+                results = service.files().list(q=query).execute()
+                folders = results.get('files', [])
+                
+                if not folders:
+                    # Create triggers folder
+                    triggers_folder_metadata = {
+                        'name': 'triggers',
+                        'parents': [folder_id],
+                        'mimeType': 'application/vnd.google-apps.folder'
+                    }
+                    triggers_folder = service.files().create(body=triggers_folder_metadata).execute()
+                    triggers_folder_id = triggers_folder['id']
+                else:
+                    triggers_folder_id = folders[0]['id']
+                
+                # Update file metadata to use triggers folder
+                file_metadata['parents'] = [triggers_folder_id]
+                
+                # Delete existing trigger file if exists
+                existing_query = f"'{triggers_folder_id}' in parents and name = 'download_trigger.json'"
+                existing_results = service.files().list(q=existing_query).execute()
+                existing_files = existing_results.get('files', [])
+                
+                for existing_file in existing_files:
+                    service.files().delete(fileId=existing_file['id']).execute()
+                
+                # Create new trigger file
+                media = MediaFileUpload(
+                    io.BytesIO(trigger_content.encode()),
+                    mimetype='application/json',
+                    resumable=False
+                )
+                
+                file = service.files().create(
+                    body=file_metadata,
+                    media_body=media
+                ).execute()
+                
+                print("✅ Trigger file created successfully!")
+                print(f"📁 File ID: {file['id']}")
+                print("🚀 Colab will detect this trigger and start downloading new videos")
+                
+                return True
+                
+            except Exception as e:
+                print(f"❌ Error creating trigger file: {e}")
+                return False
+        
+        if __name__ == "__main__":
+            create_trigger_file()
+        EOF
+        
+        python trigger_download.py
+    
+    - name: Log completion
+      run: |
+        echo "🎉 Daily video check completed!"
+        echo "📅 Next check: Tomorrow at 7 AM Pakistan time"
+        echo "📝 Colab notebook will now check for new videos and download them"
